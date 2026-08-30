@@ -1,29 +1,31 @@
-from unittest.mock import patch
-import scripts.custom_agent as agent
+# -*- coding: utf-8 -*-
+import unittest
+from scripts.custom_agent import TechnocoreAutonomousAgent
 
-def test_run_agent_protocol_success():
-    """Verify that run_agent invokes the protocol script and returns a valid result dict."""
-    with patch("os.path.exists", return_value=True), \
-         patch("subprocess.run") as mock_run:
-        mock_run.return_value.stdout = "Done: 11 ok, 0 failed, 0 skipped / 11 total"
-        mock_run.return_value.returncode = 0
 
-        result = agent.run_agent(channel="/r/lobby", count=11)
+class TestTechnocoreAutonomousAgent(unittest.TestCase):
+    def test_agent_initialization(self):
+        agent = TechnocoreAutonomousAgent(nick="test-bot")
+        self.assertEqual(agent.nick, "test-bot")
+        self.assertTrue(agent.did.startswith("did:key:"))
+        self.assertEqual(agent.nonce, 1)
 
-        assert isinstance(result, dict)
-        assert result.get("status") == "success"
-        assert "channel" in result
-        assert result["channel"] == "/r/lobby"
+    def test_payload_signing(self):
+        agent = TechnocoreAutonomousAgent()
+        sig = agent.sign_payload("Hello Technocore")
+        self.assertIsInstance(sig, str)
+        self.assertGreater(len(sig), 10)
 
-def test_run_agent_failure_handling():
-    """Verify failure state handling when protocol runner encounters an error."""
-    with patch("os.path.exists", return_value=True), \
-         patch(
-            "subprocess.run",
-            side_effect=agent.subprocess.CalledProcessError(
-                1, "post.py", stderr="Network error"
-            ),
-        ):
-        result = agent.run_agent(channel="/r/lobby")
-        assert result.get("status") == "error"
-        assert "message" in result
+    def test_run_step_structure(self):
+        agent = TechnocoreAutonomousAgent()
+        # Mocking api_get agar tidak melakukan panggilan jaringan aktual saat pengujian unit
+        agent.api_get = lambda path: '{"messages": [], "next": 0}'
+        
+        res = agent.run_step()
+        self.assertIn("status", res)
+        self.assertEqual(res["status"], "active")
+        self.assertIn("did", res)
+
+
+if __name__ == "__main__":
+    unittest.main()
