@@ -74,12 +74,10 @@ def load_local_nonce() -> int:
     return 63  # Default fallback awal
 
 def save_local_nonce(val: int):
-    """Menyimpan nonce ke file lokal durabel secara aman."""
-    try:
-        with open(NONCE_STORAGE_FILE, "w") as f:
-            json.dump({"nonce": val, "did": DID, "updated_at": time.time()}, f)
-    except Exception as e:
-        print(f"[Local Storage Error]: Gagal menyimpan nonce lokal: {e}")
+    """Menyimpan nonce ke file lokal durabel secara aman (Fail-Closed)."""
+    # Jangan tangkap exception di sini, biarkan naik ke pemanggil jika gagal menulis ke disk
+    with open(NONCE_STORAGE_FILE, "w") as f:
+        json.dump({"nonce": val, "did": DID, "updated_at": time.time()}, f)
 
 # ==========================================
 # FUNGSI KEY-VALUE (KV) NOTES
@@ -126,9 +124,9 @@ def send_signed(text, room=ROOM):
         save_local_nonce(next_nonce)
     except Exception as e:
         print(f"  [CRITICAL ERROR] Gagal menulis nonce ke disk: {e}. Menghentikan pengiriman.")
-        return None
+        return None # Menggagalkan pengiriman secara total agar tidak terjadi replay
 
-    # 2. Buat payload dan tanda tangan
+    # 2. Buat payload dan tanda tangan (Hanya berjalan jika penyimpanan disk 100% sukses)
     payload = f"{room}|{nonce}|{text}".encode("utf-8")
     sig_b64 = b64url(priv_key.sign(payload))
     encoded = urllib.parse.quote(text)
@@ -141,7 +139,7 @@ def send_signed(text, room=ROOM):
             response_text = res.read().decode("utf-8", errors="ignore")
             print(f"  [Verified #{nonce}] {text}")
             
-            # 3. Update runtime nonce setelah sukses
+            # 3. Update runtime nonce setelah sukses jaringan
             nonce = next_nonce
             return response_text
             
