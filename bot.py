@@ -6,6 +6,7 @@ import random
 import time
 import urllib.parse
 import base58
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 import requests
 from dotenv import load_dotenv
@@ -14,11 +15,28 @@ load_dotenv()
 
 ROOM = "lobby"
 BASE_URL = "https://technocore.chat"
-SEED_HEX = os.getenv("SEED_HEX")
-if not SEED_HEX:
-    raise ValueError("SEED_HEX tidak ditemukan di environment variables!")
 
-priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(SEED_HEX))
+# ==========================================
+# PEMUATAN IDENTITY.PEM TERENKRIPSI PASSPHRASE
+# ==========================================
+IDENTITY_FILE = "identity.pem"
+PASSPHRASE = b"@Sitirahayu11"
+
+if not os.path.exists(IDENTITY_FILE):
+    raise FileNotFoundError(f"File identitas '{IDENTITY_FILE}' tidak ditemukan di folder bot! Pastikan sudah ditaruh di sini.")
+
+try:
+    with open(IDENTITY_FILE, "rb") as f:
+        pem_data = f.read()
+    
+    priv_key = serialization.load_pem_private_key(
+        pem_data,
+        password=PASSPHRASE
+    )
+    print(f"[Security]: Berhasil mendekripsi '{IDENTITY_FILE}' menggunakan passphrase.")
+except Exception as e:
+    raise ValueError(f"Gagal memuat/mendekripsi identity.pem (Periksa passphrase atau file corrupt): {e}")
+
 raw_pub = priv_key.public_key().public_bytes_raw()
 
 # ==========================================
@@ -39,7 +57,6 @@ NAMESPACE = "angga-agent-project"
 # ==========================================
 # PENYIMPANAN LOCAL DURABLE STORAGE UNTUK NONCE (AMAN DARI EKSTERNAL KV)
 # ==========================================
-# Mengunci state nonce berdasarkan DID lokal agar tahan banting dan kebal dari replay/tampering eksternal
 NONCE_STORAGE_FILE = f"agent_nonce_{did_segment[:12]}.json"
 
 def load_local_nonce() -> int:
@@ -65,41 +82,29 @@ def save_local_nonce(val: int):
         print(f"[Local Storage Error]: Gagal menyimpan nonce lokal: {e}")
 
 # ==========================================
-# FUNGSI KEY-VALUE (KV) NOTES (Hanya untuk non-security metadata)
+# FUNGSI KEY-VALUE (KV) NOTES
 # ==========================================
 def set_kv_note(key, value):
-    url = f"{BASE_URL}/kv/{key}"
+    # PERBAIKAN: Menggunakan standar jalur /kv/{NAMESPACE}/{key} sesuai protokol Technocore
+    url = f"{BASE_URL}/kv/{NAMESPACE}/{key}"
     try:
         res = requests.post(url, json={"value": value}, timeout=10)
         res.raise_for_status()
-        print(f"  [KV Success] Key '{key}' updated successfully.")
+        print(f"  [KV Success] Key '{NAMESPACE}/{key}' updated successfully.")
         return res.text
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response else "Unknown"
-        print(f"  [ERROR] KV write REJECTED (HTTP {status}).")
+        print(f"  [ERROR] KV write REJECTED (HTTP {status}) pada jalur {url}.")
         return None
     except Exception as e:
         print(f"  [ERROR] Network failure during set_kv_note: {e}")
         return None
-    try:
-        res = requests.post(url, json={"value": value}, timeout=10)
-        res.raise_for_status()
-        print(f"  [KV Success] Key '{key}' updated successfully.")
-        return res.text
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response else "Unknown"
-        print(f"  [ERROR] KV write REJECTED (HTTP {status}).")
-        return None
-    except Exception as e:
-        print(f"  [ERROR] Network failure during set_kv_note: {e}")
-        return None
+
 # ==========================================
 # INISIALISASI NONCE & VARIABEL GLOBAL
 # ==========================================
 last_seq = 0
 last_heartbeat = time.time()
-
-# Muat nonce secara eksklusif dari local durable storage (memenuhi syarat maintainer)
 nonce = load_local_nonce()
 
 STATUS_MESSAGES = [
@@ -114,6 +119,16 @@ def b64url(data: bytes) -> str:
 
 def send_signed(text, room=ROOM):
     global nonce
+    
+    # 1. Amankan nonce baru ke file lokal TERLEBIH DAHULU (Fail-Closed)
+    next_nonce = nonce + 1
+    try:
+        save_local_nonce(next_nonce)
+    except Exception as e:
+        print(f"  [CRITICAL ERROR] Gagal menulis nonce ke disk: {e}. Menghentikan pengiriman.")
+        return None
+
+    # 2. Buat payload dan tanda tangan
     payload = f"{room}|{nonce}|{text}".encode("utf-8")
     sig_b64 = b64url(priv_key.sign(payload))
     encoded = urllib.parse.quote(text)
@@ -121,17 +136,17 @@ def send_signed(text, room=ROOM):
     url = f"{BASE_URL}{path}"
     
     try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        
-        print(f"  [Verified #{nonce}] {text}")
-        nonce += 1
-        save_local_nonce(nonce)
-        return res.text
-        
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response else "Unknown"
-        print(f"  [ERROR] Signed write REJECTED (HTTP {status}). Nonce #{nonce} NOT advanced.")
+        req = urllib.request.Request(url, headers={"User-Agent": "TechnocoreCustomAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as res:
+            response_text = res.read().decode("utf-8", errors="ignore")
+            print(f"  [Verified #{nonce}] {text}")
+            
+            # 3. Update runtime nonce setelah sukses
+            nonce = next_nonce
+            return response_text
+            
+    except urllib.error.HTTPError as e:
+        print(f"  [ERROR] Signed write REJECTED (HTTP {e.code}). Nonce #{nonce} gagal diproses server.")
         return None
     except Exception as e:
         print(f"  [ERROR] Network failure during send_signed: {e}")
@@ -160,7 +175,6 @@ def run_bot():
     
     print(f"Verified Multi-Skill Bot Online as {DID[:16]}... (Current Nonce: #{nonce})")
     
-    # Update status umum ke KV Notes non-kritis
     set_kv_note("agent_state", "online")
     set_kv_note("last_seen", str(int(time.time())))
     

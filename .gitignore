@@ -39,3 +39,6 @@ edge/public/
 edge/src/routing.json
 edge/node_modules/
 edge/.wrangler/
+identity.pem
+identity.json
+agent_nonce_*.json

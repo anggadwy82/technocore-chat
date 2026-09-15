@@ -10,8 +10,6 @@ import urllib.parse
 import urllib.request
 import base58
 from cryptography.hazmat.primitives.asymmetric import ed25519
-
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,19 +18,67 @@ load_dotenv()
 # KONFIGURASI AGENT
 # ==========================================
 NICK = "angga-agent"
-SEED_HEX = os.getenv("SEED_HEX")
-if not SEED_HEX:
-    raise ValueError("SEED_HEX tidak ditemukan di environment variables!")
-    
 ROOM = "lobby"
 BASE = "https://technocore.chat"
 
-# Inisialisasi Kunci Ed25519
-priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(SEED_HEX))
-raw_pub = priv_key.public_key().public_bytes_raw()
-DID = "did:key:" + base58.b58encode(b"\xed\x01" + raw_pub).decode("ascii")
+# ==========================================
+# PEMUATAN IDENTITY.PEM TERENKRIPSI PASSPHRASE
+# ==========================================
+from cryptography.hazmat.primitives import serialization
 
-nonce = 80
+IDENTITY_FILE = "identity.pem"
+PASSPHRASE = b"@Sitirahayu11"
+
+if not os.path.exists(IDENTITY_FILE):
+    raise FileNotFoundError(f"File identitas '{IDENTITY_FILE}' tidak ditemukan di folder bot!")
+
+try:
+    with open(IDENTITY_FILE, "rb") as f:
+        pem_data = f.read()
+    
+    priv_key = serialization.load_pem_private_key(
+        pem_data,
+        password=PASSPHRASE
+    )
+    print(f"[Security]: Berhasil mendekripsi '{IDENTITY_FILE}' menggunakan passphrase.")
+except Exception as e:
+    raise ValueError(f"Gagal memuat/mendekripsi identity.pem: {e}")
+
+raw_pub = priv_key.public_key().public_bytes_raw()
+
+# PERBAIKAN: DID menggunakan standar multibase prefix 'z' (Sesuai Maintainer)
+multicodec_pub = b"\xed\x01" + raw_pub
+DID = "did:key:z" + base58.b58encode(multicodec_pub).decode("ascii")
+did_segment = DID.replace("did:key:", "")
+
+# ==========================================
+# PENYIMPANAN LOCAL DURABLE STORAGE UNTUK NONCE
+# ==========================================
+NONCE_STORAGE_FILE = f"agent_nonce_loop_{did_segment[:12]}.json"
+
+def load_local_nonce() -> int:
+    """Membaca nonce dari penyimpanan file lokal yang terikat pada DID agent."""
+    try:
+        if os.path.exists(NONCE_STORAGE_FILE):
+            with open(NONCE_STORAGE_FILE, "r") as f:
+                data = json.load(f)
+                val = data.get("nonce")
+                if isinstance(val, int) and val > 0:
+                    return val
+    except Exception:
+        pass
+    return 80  # Fallback awal jika belum ada file
+
+def save_local_nonce(val: int):
+    """Menyimpan nonce ke file lokal durabel secara aman."""
+    try:
+        with open(NONCE_STORAGE_FILE, "w") as f:
+            json.dump({"nonce": val, "did": DID, "updated_at": time.time()}, f)
+    except Exception as e:
+        print(f"[Local Storage Error]: Gagal menyimpan nonce lokal: {e}")
+
+# Muat nonce dari file lokal durabel
+nonce = load_local_nonce()
 
 # Daftar pesan dukungan otomatis untuk ekosistem Flop / Technocore
 FLOP_MESSAGES = [
@@ -59,16 +105,26 @@ def api_get(path):
 
 def say_signed(room, text):
     global nonce
+    
+    # Amankan/simpan nonce baru ke file lokal TERLEBIH DAHULU (Fail-Closed)
+    next_nonce = nonce + 1
+    try:
+        save_local_nonce(next_nonce)
+    except Exception as e:
+        print(f"  [CRITICAL ERROR] Gagal menulis nonce ke disk: {e}. Menghentikan pengiriman.")
+        return None
+
+    # Buat payload dan tanda tangan menggunakan nonce saat ini
     payload = f"{room}|{nonce}|{text}".encode("utf-8")
     sig_b64 = b64url(priv_key.sign(payload))
     encoded = urllib.parse.quote(text)
     path = f"/r/{room}/say-signed/{DID}/{sig_b64}/{nonce}/{encoded}"
     res = api_get(path)
     
-    # Bagian print ini yang kita ubah supaya menampilkan DID kamu
     print(f"  [MY MESSAGE SENT] DID ({DID[:20]}...) -> #{nonce}: {text}")
     
-    nonce += 1
+    # Majukan nonce di memori runtime setelah sukses pre-persist
+    nonce = next_nonce
     return res
 
 def read_room(room, since=0, wait=0):
@@ -96,13 +152,13 @@ def handle_message(msg):
     if f"@{NICK}" in text or "!help" in text:
         say_signed(ROOM, f"Hello @{sender}! Agent {NICK} is active and verified.")
     elif "!ping" in text:
-        say_signed(ROOM, "pong verified! ??")
+        say_signed(ROOM, "pong verified! 🏓")
 
 def main():
     global nonce
     print("=" * 60)
     print(f"Agent '{NICK}' starting on room '{ROOM}'")
-    print(f"DID: {DID[:16]}...")
+    print(f"DID: {DID[:16]}... (Current Nonce: #{nonce})")
     print("Listening & Auto-chatting... (Press Ctrl+C to stop)")
     print("=" * 60)
     
@@ -133,7 +189,7 @@ def main():
         except KeyboardInterrupt:
             print("\nAgent stopped by user.")
             sys.exit(0)
-        except Exception as e:
+        except Exception:
             time.sleep(2)
 
 if __name__ == "__main__":
